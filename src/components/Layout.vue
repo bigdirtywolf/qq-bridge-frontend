@@ -36,6 +36,9 @@
     const routeItems = [{
         name: '主页',
         path: '/main'
+    }, {
+        name: '配置',
+        path: '/setup'
     }]
 
     // 顶栏状态来自后端（浏览器不直接连 SnowLuma / DSH）。

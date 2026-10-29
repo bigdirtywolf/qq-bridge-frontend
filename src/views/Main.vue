@@ -1,6 +1,34 @@
 <template>
     <div class="main-container">
         <div class="section">
+            <div class="section-title">消息</div>
+            <div class="message-list" ref="listRef">
+                <div class="message-item" v-for="(item, index) in messages" :key="index">
+                    <span class="message-time">{{ timeText(item.at) }}</span>
+                    <span class="message-tag" :class="item.direction === 'in' ? 'in' : 'out'">
+                        {{ item.direction === 'in' ? '收' : '发' }}
+                    </span>
+                    <span class="message-tag kind">{{ item.kind === 'group' ? '群' : '私' }}</span>
+                    <span class="message-name">{{ item.name }}</span>
+                    <span class="message-text">{{ item.text }}</span>
+                </div>
+                <div class="message-empty" v-if="!messages.length">暂无消息</div>
+            </div>
+
+            <div class="send-row">
+                <el-select v-model="send.kind" class="send-kind">
+                    <el-option label="私聊" value="private" />
+                    <el-option label="群聊" value="group" />
+                </el-select>
+                <el-input v-model="send.id" class="send-id" :placeholder="send.kind === 'group' ? '群号' : 'QQ 号'" />
+                <el-input v-model="send.text" class="send-text" placeholder="要发送的内容" @keyup.enter="handleSend" />
+                <el-checkbox v-model="send.viaDsh" class="send-via">交给 DSH</el-checkbox>
+                <el-button type="primary" :loading="sending" @click="handleSend">发送</el-button>
+                <el-button :disabled="sending" @click="handleClear">清空</el-button>
+            </div>
+        </div>
+
+        <div class="section">
             <div class="section-title">连接设置</div>
             <div class="form-row">
                 <span class="label">SnowLuma 目录</span>
@@ -44,10 +72,11 @@
 </template>
 
 <script setup>
-    import { computed, reactive, ref } from 'vue'
-    import { ElMessage } from 'element-plus'
-    import { connectBridge, disconnectBridge } from '@/utils/bridge'
+    import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+    import { ElMessage, ElMessageBox } from 'element-plus'
+    import { clearMessages, connectBridge, disconnectBridge, getMessages, sendChatMessage } from '@/utils/bridge'
     import { bridgeStatus, refreshBridgeStatus } from '@/utils/bridgeStatus'
+    import config from '@/const/config'
 
     const form = reactive({
         snowLuma: {
@@ -58,7 +87,19 @@
         },
     })
 
+    const send = reactive({
+        kind: 'private',
+        id: '',
+        text: '',
+        viaDsh: true,
+    })
+
     const connecting = ref(false)
+    const sending = ref(false)
+    const messages = ref([])
+    const listRef = ref(null)
+
+    let messageTimer = null
 
     const snowLuma = computed(() => bridgeStatus.snowLuma)
     const dsh = computed(() => bridgeStatus.dsh)
@@ -100,6 +141,70 @@
         return map[status] || '未连接'
     }
 
+    const timeText = (at) => {
+        if (!at) return '-'
+        const date = new Date(at)
+        const pad = (value) => String(value).padStart(2, '0')
+        return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+    }
+
+    /** 拉到最新消息后滚到底部，不用手动往下拖。 */
+    const refreshMessages = async () => {
+        try {
+            messages.value = (await getMessages(50)) || []
+            await nextTick()
+            if (listRef.value) listRef.value.scrollTop = listRef.value.scrollHeight
+        } catch {
+            // 后端没起来时保留上一次列表。
+        }
+    }
+
+    const handleSend = async () => {
+        const id = send.id.trim()
+        const text = send.text.trim()
+        if (!id) {
+            ElMessage.warning(send.kind === 'group' ? '请填群号' : '请填 QQ 号')
+            return
+        }
+        if (!text) {
+            ElMessage.warning('请填要发送的内容')
+            return
+        }
+
+        sending.value = true
+        try {
+            // 交给 DSH 时要等模型出话，可能比较久；接口本身没有超时压力。
+            const result = await sendChatMessage({ kind: send.kind, id, text, viaDsh: send.viaDsh })
+            if (result?.sent) {
+                ElMessage.success(send.viaDsh ? 'DSH 已生成并发送' : '已发送')
+                send.text = ''
+            } else {
+                // DSH 判定这次没什么好说的：没有内容可发。
+                ElMessage.info('DSH 本次没有回复')
+            }
+            await refreshMessages()
+        } catch {
+            // api 拦截器已经提示过了。
+        } finally {
+            sending.value = false
+        }
+    }
+
+    const handleClear = async () => {
+        try {
+            await ElMessageBox.confirm('确定清空消息记录吗？', '提示', { type: 'warning' })
+        } catch {
+            return
+        }
+        try {
+            await clearMessages()
+            await refreshMessages()
+            ElMessage.success('已清空')
+        } catch {
+            //
+        }
+    }
+
     const handleConnect = async () => {
         connecting.value = true
         try {
@@ -129,6 +234,16 @@
             connecting.value = false
         }
     }
+
+    onMounted(() => {
+        refreshMessages()
+        messageTimer = setInterval(refreshMessages, config.statusInterval)
+    })
+
+    onUnmounted(() => {
+        if (messageTimer) clearInterval(messageTimer)
+        messageTimer = null
+    })
 </script>
 
 <style scoped>
@@ -183,5 +298,97 @@
 
     .dim {
         color: #999;
+    }
+
+    /* 消息区 */
+    .message-list {
+        height: 280px;
+        overflow-y: auto;
+        border: 1px solid #ececf3;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 8px 12px;
+        margin-bottom: 12px;
+    }
+
+    .message-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        font-size: 13px;
+        line-height: 22px;
+        padding: 3px 0;
+        color: #444;
+    }
+
+    .message-time {
+        color: #999;
+        flex-shrink: 0;
+    }
+
+    .message-tag {
+        flex-shrink: 0;
+        font-size: 12px;
+        line-height: 18px;
+        padding: 0 6px;
+        border-radius: 4px;
+        color: #ffffff;
+    }
+
+    .message-tag.in {
+        background: #7d8ce8;
+    }
+
+    .message-tag.out {
+        background: #57b28b;
+    }
+
+    .message-tag.kind {
+        background: #c6c6d3;
+    }
+
+    .message-name {
+        flex-shrink: 0;
+        color: #666;
+        max-width: 180px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .message-text {
+        word-break: break-all;
+        white-space: pre-wrap;
+    }
+
+    .message-empty {
+        font-size: 13px;
+        color: #999;
+        line-height: 260px;
+        text-align: center;
+    }
+
+    .send-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .send-kind {
+        width: 100px;
+        flex-shrink: 0;
+    }
+
+    .send-id {
+        width: 150px;
+        flex-shrink: 0;
+    }
+
+    .send-text {
+        flex: 1;
+    }
+
+    .send-via {
+        flex-shrink: 0;
     }
 </style>

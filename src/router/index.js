@@ -13,6 +13,13 @@ const routes = [
       meta: {
         title: '主页'
       }
+    }, {
+      path: '/setup',
+      name: 'Setup',
+      component: () => import('@/views/Setup.vue'),
+      meta: {
+        title: '配置'
+      }
     }]
   },
   {
